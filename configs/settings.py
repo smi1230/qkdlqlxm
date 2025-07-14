@@ -19,7 +19,7 @@ DATA_DIR = os.path.join(PROJECT_ROOT_DIR, 'data')
 # 훈련된 AI 모델 파일(.keras)과 관련 아티팩트(feature_names.joblib)가 저장될 디렉토리 경로입니다.
 MODEL_DIR = os.path.join(PROJECT_ROOT_DIR, 'models')
 # 실제 사용할 훈련된 모델 파일의 전체 경로입니다.
-model_path = os.path.join(MODEL_DIR, 'best_hybrid_model_remodeling_newdata_01.keras')
+model_path = os.path.join(MODEL_DIR, 'best_tbm_model.keras')
 # 모델이 학습한 피쳐(특성)의 이름 목록 파일 경로입니다. 예측 시 입력 데이터의 순서를 맞추기 위해 필수적입니다.
 FEATURES_PATH = os.path.join(MODEL_DIR, 'feature_names.joblib')
 
@@ -116,7 +116,7 @@ VOLUME_PERCENTILE_WINDOW = 50
 TBM_ATR_PERIOD = 12                 # 동적 변동성 계산을 위한 ATR 주기 (본래 20이었으나 1시간을 기준으로 하려 12로 설정)
 TBM_PROFIT_TAKE_MULT = 2.0          # 이익 실현 장벽 (ATR의 2.0배)
 TBM_STOP_LOSS_MULT = 1.0            # 손절 장벽 (ATR의 1.0배)
-TBM_MAX_HOLD_PERIODS = TARGET_PERIOD           # 최대 포지션 보유 기간 (캔들 수)
+TBM_MAX_HOLD_PERIODS = TARGET_PERIOD # 최대 포지션 보유 기간 (캔들 수)
 
 # ==============================================================================
 # [ 6. AI 모델 아키텍처 설정 (CNN-LSTM-Transformer) ]
@@ -133,13 +133,8 @@ HYBRID_MODEL_CONFIG = {
     'dropout_rate': 0.3
 }
 
-ACTIVE_OUTPUTS = ['price_direction']
-
-MULTITASK_LOSS_WEIGHTS = {
-    'price_direction': 0.8,
-    'volatility': 0.2,
-    'volume': 0.1,
-}
+# 이제 모델은 단 하나의 타겟('trade_outcome')에만 집중합니다.
+ACTIVE_OUTPUTS = ['trade_outcome']
 
 # ==============================================================================
 # [ 7. AI 모델 훈련 설정 ]
@@ -170,7 +165,6 @@ TOP_N_SYMBOLS = 10
 POSITION_CHANGE_THRESHOLD = 0.20
 FORCED_REBALANCE_CYCLES = int(60 / int(INTERVAL))
 
-DL_DIRECTION_WEIGHT = 0.6
 DL_CONFIDENCE_WEIGHT = 0.4
 COMPOSITE_DL_WEIGHT = 0.70
 COMPOSITE_TECHNICAL_WEIGHT = 0.30
