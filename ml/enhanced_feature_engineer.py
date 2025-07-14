@@ -14,17 +14,15 @@ logger = logging.getLogger(__name__)
 
 class EnhancedFeatureEngineer:
     """
-    [ 1단계 수정 완료 (TBM) ]
-    - 이 클래스는 원본 데이터(가격, 거래량)로부터 AI 모델이 학습할 수 있는
-      다양한 피쳐(Feature, 특성)와 타겟(Target, 정답)을 생성하는 모든 책임을 집니다.
-    - create_multitask_targets 함수가 삼중 장벽 기법(TBM)을 사용하여
-      실제 P&L 기반의 타겟을 생성하도록 수정되었습니다.
+    [ 1.2단계 수정 완료 (타겟 명확화) ]
+    - create_multitask_targets 함수의 이름을 create_targets로 변경하고,
+      오직 TBM 기반의 단일 타겟 'trade_outcome'만 생성하도록 수정했습니다.
+    - 불필요한 volatility 타겟 생성 로직을 완전히 제거하여 모델이 단일 목표에 집중하도록 합니다.
     """
 
     def __init__(self, volume_threshold: float = 1e-8):
         self.volume_threshold = volume_threshold
         self.epsilon = 1e-9
-        # 이제 target_period는 TBM의 최대 보유 기간으로 대체됩니다.
         all_periods = settings.MA_PERIODS_FOR_PRICE_POS + settings.VWAP_PERIODS + \
                       settings.OFI_PERIODS + settings.VRSI_PERIODS + settings.RSI_PERIODS + settings.LEGACY_RSI_PERIODS + \
                       settings.VOLUME_ROC_PERIODS + [settings.BB_PERIOD, settings.MACD_SLOW, settings.ATR_PERIOD, 50]
@@ -52,55 +50,38 @@ class EnhancedFeatureEngineer:
             logger.error(f"Feature creation failed during create_features: {e}", exc_info=True)
             return pd.DataFrame()
 
-    def create_multitask_targets(self, df: pd.DataFrame) -> Dict[str, pd.Series]:
+    def create_targets(self, df: pd.DataFrame) -> Dict[str, pd.Series]:
         """
-        [핵심 수정] 삼중 장벽 기법(TBM)을 사용하여 실제 P&L 기반의 타겟을 생성합니다.
-        - 레이블 0: 손절 (하단 장벽 도달)
-        - 레이블 1: 시간만료 (수직 장벽 도달)
+        [핵심 수정] TBM 기반의 단일 타겟 'trade_outcome'을 생성합니다.
         - 레이블 2: 수익 (상단 장벽 도달)
+        - 레이블 1: 시간만료 (수직 장벽 도달)
+        - 레이블 0: 손절 (하단 장벽 도달)
         """
         try:
             # 1. 동적 변동성(ATR) 및 장벽 계산
             atr = ta.atr(df['high'], df['low'], df['close'], length=settings.TBM_ATR_PERIOD).fillna(0)
-            atr_scaled = atr * df['close'] * 0.01 # ATR을 가격 비율로 변환 (선택적)
             
-            upper_barrier_mult = settings.TBM_PROFIT_TAKE_MULT
-            lower_barrier_mult = settings.TBM_STOP_LOSS_MULT
-            
-            # 각 시점의 종가를 기준으로 상단/하단 장벽 가격을 계산합니다.
-            upper_barrier = df['close'] + (atr * upper_barrier_mult)
-            lower_barrier = df['close'] - (atr * lower_barrier_mult)
+            upper_barrier = df['close'] + (atr * settings.TBM_PROFIT_TAKE_MULT)
+            lower_barrier = df['close'] - (atr * settings.TBM_STOP_LOSS_MULT)
             
             max_hold_periods = settings.TBM_MAX_HOLD_PERIODS
-            labels = pd.Series(np.nan, index=df.index) # 결과를 저장할 빈 시리즈
+            labels = pd.Series(np.nan, index=df.index)
 
             # 2. 미래 가격 경로 탐색 및 레이블링
-            # 벡터화된 연산을 위해 미래 가격 데이터를 미리 준비합니다.
             future_highs = [df['high'].shift(-i) for i in range(1, max_hold_periods + 1)]
             future_lows = [df['low'].shift(-i) for i in range(1, max_hold_periods + 1)]
-
-            # 각 시점부터 미래 N개 캔들 동안의 최고가/최저가를 계산합니다.
             path_high = pd.concat(future_highs, axis=1).max(axis=1)
             path_low = pd.concat(future_lows, axis=1).min(axis=1)
 
-            # 상단/하단 장벽 도달 여부를 확인합니다.
             hit_upper = path_high >= upper_barrier
             hit_lower = path_low <= lower_barrier
 
-            # 레이블링: 수익(2), 손절(0), 시간만료(1)
-            labels[hit_upper] = 2
-            labels[hit_lower & ~hit_upper] = 0 # 상단과 하단을 동시에 넘는 경우, 수익을 우선
-            labels.fillna(1, inplace=True) # 어느 장벽에도 닿지 않으면 시간만료(1)로 처리
-
-            # 멀티태스크 학습을 위해 다른 타겟들도 계산합니다 (기존 로직 유지 또는 개선 가능).
-            # 여기서는 price_direction만 TBM으로 교체하고 나머지는 비활성화합니다.
-            future_volatility_raw = (path_high - path_low) / (df['close'] + self.epsilon)
+            labels[hit_upper] = 2  # 수익
+            labels[hit_lower & ~hit_upper] = 0 # 손절 (수익과 동시 도달 시 수익 우선)
+            labels.fillna(1, inplace=True) # 시간만료
             
-            return {
-                'price_direction': labels.astype(int),
-                'volatility': np.log1p(future_volatility_raw),
-                # 'volume' 타겟은 필요 시 추가 구현
-            }
+            return {'trade_outcome': labels.astype(int)}
+            
         except Exception as e:
             logger.error(f"TBM Target creation failed: {e}", exc_info=True)
             return {}
