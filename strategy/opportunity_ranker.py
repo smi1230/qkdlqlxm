@@ -1,5 +1,3 @@
-# /strategy/opportunity_ranker.py
-
 import logging
 import pandas as pd
 import numpy as np
@@ -19,9 +17,9 @@ logger = logging.getLogger(__name__)
 
 class OpportunityRanker:
     """
-    [ v5.2 - 오류 수정 ]
-    - AI의 멀티태스크 예측과 기술적 지표를 결합하여 모든 거래 가능 종목의 기회를 분석.
-    - get_all_opportunities 함수가 모든 분석 결과를 반환하도록 수정.
+    [ 1단계 수정 완료 (TBM) ]
+    - AI 예측 점수 계산 시, TBM 기반의 3-클래스({0:손절, 1:중립, 2:수익})
+      출력에 맞게 가중치를 [-1, 0, 1]로 수정했습니다.
     """
 
     def __init__(self,
@@ -41,9 +39,6 @@ class OpportunityRanker:
         logger.info("OpportunityRanker initialized.")
 
     def get_all_opportunities(self, tradeable_symbols: List[str]) -> List[Dict]:
-        """
-        [✨ 핵심 수정] 모든 거래 가능 종목에 대해 기회 분석을 수행하고, 필터링되지 않은 전체 결과를 반환합니다.
-        """
         all_opportunities = []
         for symbol in tradeable_symbols:
             try:
@@ -56,11 +51,9 @@ class OpportunityRanker:
         if not all_opportunities:
             logger.info("No actionable opportunities found in this cycle.")
         
-        # 정렬이나 필터링 없이 모든 분석 결과를 반환
         return all_opportunities
 
     def _analyze_single_symbol(self, symbol: str) -> Optional[Dict]:
-        """단일 종목에 대한 종합적인 기회 분석 (데이터 조회 -> 피처 생성 -> AI 예측 -> 점수 계산)"""
         df = self.data_handler.get_dataframe(symbol)
         if df is None or len(df) < self.feature_engineer.longest_lookback: return None
 
@@ -70,7 +63,6 @@ class OpportunityRanker:
         latest_sequence_df = features_df.iloc[-self.sequence_length:]
         if len(latest_sequence_df) < self.sequence_length: return None
         
-        # feature_names가 로드되었는지 확인
         if self.predictor.feature_names is None:
             logger.error("Feature names are not loaded in the predictor. Cannot proceed.")
             return None
@@ -103,20 +95,16 @@ class OpportunityRanker:
         }
 
     def _calculate_dl_score(self, predictions: Dict[str, Any]) -> Dict[str, float]:
-        """AI의 멀티태스크 예측 결과를 하나의 리스크 조정 점수로 변환 (누락된 예측값 안전 처리)"""
         price_direction_probs = predictions.get('price_direction')
         confidence = predictions.get('confidence', 0.0)
         volatility = predictions.get('volatility', 0.0)
-        volume_pred = predictions.get('volume', 0.0)
-
+        
         if price_direction_probs is None:
             logger.warning("'_calculate_dl_score' received predictions without 'price_direction'. Returning neutral score.")
-            return {
-                "direction_score": 0.0, "confidence": 0.0, "volatility": 0.0,
-                "volume_pred_log": 0.0, "risk_adjusted_score": 0.0
-            }
+            return {"direction_score": 0.0, "confidence": 0.0, "volatility": 0.0, "risk_adjusted_score": 0.0}
 
-        weights = np.array([-2, -1, 0, 1, 2])
+        # [핵심 수정] 가중치를 3-클래스({0:손절, 1:중립, 2:수익})에 맞게 변경
+        weights = np.array([-1, 0, 1])
         direction_score = np.sum(price_direction_probs * weights)
         risk_adjusted_score = direction_score * (1 + confidence * self.dl_confidence_weight) / (1 + volatility * settings.VOLATILITY_ADJUSTMENT_FACTOR)
         
@@ -124,12 +112,11 @@ class OpportunityRanker:
             "direction_score": float(direction_score),
             "confidence": float(confidence),
             "volatility": float(volatility),
-            "volume_pred_log": float(volume_pred),
+            "volume_pred_log": float(predictions.get('volume', 0.0)),
             "risk_adjusted_score": float(risk_adjusted_score)
         }
 
     def _calculate_technical_score(self, features: pd.Series) -> float:
-        """다변량 기술 지표를 분석하여 단일 점수를 계산."""
         try:
             rsi = features.get(f'rsi_{settings.RSI_PERIODS[0]}', 50.0)
             rsi_score = -((rsi - 50.0) / 25.0)
@@ -149,7 +136,6 @@ class OpportunityRanker:
             return 0.0
 
     def _calculate_composite_score(self, dl_score: float, technical_score: float) -> float:
-        """DL 점수와 TA 점수를 최종 가중 합산하여 반환"""
         final_score = (dl_score * self.composite_dl_weight) + (technical_score * self.composite_technical_weight)
 
         if np.sign(dl_score) == np.sign(technical_score) and dl_score != 0:
